@@ -5,7 +5,8 @@ import logging
 
 _debug = False
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
+
 
 class ConnectionError(Exception): pass
 
@@ -46,8 +47,6 @@ class ServerConn(object):
         if not hasattr(res, "__name__") or not res.__name__.startswith('process_'):
             return res
         def caller(*args, **kw):
-            logger.info("Calling %s with: args(%s), kwargs(%s)",
-                         res.__name__, args, kw)
             return self._do_interaction(*res(*args, **kw))
         return caller
 

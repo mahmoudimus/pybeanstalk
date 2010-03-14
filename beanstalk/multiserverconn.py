@@ -16,7 +16,7 @@ from serverconn import ServerConn
 from job import Job
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 
 # This should be set to experiment with from the importing
 # module.
