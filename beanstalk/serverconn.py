@@ -1,11 +1,20 @@
 import socket
 import select
+import time
 import protohandler
 import logging
 
 _debug = False
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
+
+
+# Set SOCKET_TIMEOUT_SECONDS to None if you want to use blocking socket.
+SOCKET_TIMEOUT_SECONDS = 10
+# Retry NUMBER_OF_CONNECTION_RETRIES times, before raise ConnectionError.
+NUMBER_OF_CONNECTION_RETRIES = 2
+# sleep SLEEP_BEFORE_RECONN_SECONDS before renew the connection.
+SLEEP_BEFORE_RECONN_SECONDS = 1
 
 
 class ConnectionError(Exception): pass
@@ -58,6 +67,7 @@ class ServerConn(object):
 
     def __makeConn(self):
         self._socket = socket.socket()
+        self._socket.settimeout(SOCKET_TIMEOUT_SECONDS)
         self._socket.connect((self.server, self.port))
         if self.poller:
             self.poller.register(self._socket, select.POLLIN)
@@ -66,7 +76,10 @@ class ServerConn(object):
     def __writeline(self, line):
         try:
             self._socket.sendall(line)
+        except (socket.error, socket.timeout):
+            raise ConnectionError
         except:
+            # TODO: This does not look the right type to raise
             raise protohandler.errors.ProtoError
 
     def _get_response(self, handler):
@@ -82,10 +95,10 @@ class ServerConn(object):
             recv = self._socket.recv(handler.remaining)
             if not recv:
                 closedmsg = "Remote server %(server)s:%(port)s has "\
-                            "closed connection" % { "server" : self.server.ip,
-                                                    "port" : self.server.port}
+                            "closed connection" % { "server" : self.server,
+                                                    "port" : self.port}
                 self.close()
-                raise protohandler.errors.ProtoError(closedmsg)
+                raise ConnectionError(closedmsg)
             res = handler(recv)
             if res: break
 
@@ -94,8 +107,27 @@ class ServerConn(object):
         return res
 
     def _do_interaction(self, line, handler):
-        self.__writeline(line)
-        return self._get_response(handler)
+        num_conn_tries = 0
+        while num_conn_tries < NUMBER_OF_CONNECTION_RETRIES:
+            num_conn_tries += 1
+            try:
+                if not self._socket:
+                    self.__makeConn()
+                self.__writeline(line)
+                return self._get_response(handler)
+            except (ConnectionError, socket.timeout, socket.error):
+                self.close()
+                if num_conn_tries != NUMBER_OF_CONNECTION_RETRIES:
+                    logger.debug("Sleep %s seconds before retry",
+                                 SLEEP_BEFORE_RECONN_SECONDS)
+                    time.sleep(SLEEP_BEFORE_RECONN_SECONDS)
+        else:
+            errormsg = "Remote server %(server)s:%(port)s can not "\
+                       "be connected after %(num_tries)s." %\
+                       {"server" : self.server,
+                        "port" : self.port,
+                        "num_tries": num_conn_tries}
+            raise ConnectionError(errormsg)
 
     def _get_watchlist(self):
         return self.list_tubes_watched()['data']
@@ -121,8 +153,15 @@ class ServerConn(object):
         return self.list_tube_used()['tube']
 
     def close(self):
-        self.poller.unregister(self._socket)
-        self._socket.close()
+        if self._socket:
+            if self.poller:
+                try:
+                    self.poller.unregister(self._socket)
+                except KeyError:
+                    # _socket may not be registered yet.
+                    pass
+            self._socket.close()
+            self._socket = None
 
     def fileno(self):
         return self._socket.fileno()

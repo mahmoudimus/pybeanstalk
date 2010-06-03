@@ -11,6 +11,7 @@ others.  Probably best to setup a new beanstalkd at each test.
 import os
 import signal
 import socket
+import threading
 import time
 
 from nose.tools import with_setup, assert_raises
@@ -26,9 +27,8 @@ config = get_config("ServerConn")
 server_pid = None
 conn = None
 
-
-def setup():
-    global server_pid, conn, config
+def spawn_server():
+    global server_pid
     server_pid = os.spawnl(os.P_NOWAIT,
                             os.path.join(config.BPATH,config.BEANSTALKD),
                             os.path.join(config.BPATH,config.BEANSTALKD),
@@ -36,20 +36,29 @@ def setup():
                             '-p', config.BEANSTALKD_PORT
                             )
     print "server started at process", server_pid
+
+def setup():
+    global server_pid, conn, config
+    spawn_server()
     time.sleep(0.1)
     conn = serverconn.ServerConn(config.BEANSTALKD_HOST, int(config.BEANSTALKD_PORT))
 
-def teardown():
+def kill_server():
     print "terminating beanstalkd at", server_pid
     os.kill(server_pid, signal.SIGTERM)
 
+def teardown():
+    kill_server()
+
 
 # Test helpers:
+def _check_init():
+    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
+           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
 
 def _test_put_reserve_delete_a_job(payload, pri):
     # check preconditions
-    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
-           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
+    _check_init()
 
     # create a job
     put_id = conn.put(payload, pri)['jid']
@@ -77,8 +86,7 @@ def _test_put_reserve_delete_a_job(payload, pri):
 
 def _test_put_reserve_release_a_job(payload, pri):
     # check preconditions
-    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
-           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
+    _check_init()
 
     # create a job
     put_id = conn.put(payload, pri)['jid']
@@ -127,8 +135,7 @@ def test_ServerConn_can_put_reserve_release_a_simple_job():
 
 def test_ServerConn_can_bury_and_kick_a_job():
     # check preconditions
-    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
-           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
+    _check_init()
 
     # put and reserve the job
     put = conn.put('simple job')
@@ -169,8 +176,7 @@ def test_ServerConn_fails_to_connect_with_a_reasonable_exception():
         pass
 
 def test_tube_operations():
-    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
-           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
+    _check_init()
     # first make sure its watching default
     assert conn.watchlist == ['default']
 
@@ -213,15 +219,13 @@ def test_tube_operations():
     conn.delete(jid)
 
 def test_reserve_timeout_works():
-    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
-           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
+    _check_init()
     # essentially an instant poll. This should just timeout!
     x = conn.reserve_with_timeout(0)
     assert x['state'] == 'timeout'
 
 def test_reserve_deadline_soon():
-    assert conn.stats()['data']['current-jobs-ready'] == 0, "The server is not empty "\
-           "of jobs so test behaviour cannot be guaranteed.  Bailing out."
+    _check_init()
     # Put a short running job
     jid = conn.put('foobarbaz job!', ttr=1)['jid']
     # Reserve it, so we can setup conditions to get a DeadlineSoon error
@@ -233,4 +237,20 @@ def test_reserve_deadline_soon():
                   "of impending deadline. It did not. This is a problem!"
     x = conn.delete(jid)
     assert x['state'] == 'ok', "Didn't delete the job right. This could break future tests"
+
+def test_graceful_server_restart():
+    _check_init()
+   
+    # Test exception when connection is gone
+    global server_pid
+    os.kill(server_pid, signal.SIGTERM)
+    time.sleep(0.2)
+    nose.tools.assert_raises(serverconn.ConnectionError, conn.stats)
+
+    # Test connection reset and job eventually finished successfully
+    serverconn.NUMBER_OF_CONNECTION_RETRIES = 10
+    serverconn.SLEEP_BEFORE_RECONN_SECONDS = 1
+    t = threading.Timer(2, spawn_server)
+    t.start()
+    _check_init()
 
